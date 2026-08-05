@@ -21,6 +21,8 @@
   let isCollapsed = false;
   let autoScanTimer = null;
   let wasmError = null; // WASM 核心模块不可用时的错误信息，非空即禁止一切下载
+  let hasUpdate = false;
+  let updateUrl = "https://github.com/undsky/doudou-smartedu-down";
 
   // 可下载的目标有效文件格式
   const ALLOW_FORMATS = new Set([
@@ -910,8 +912,57 @@
       .querySelector('[data-action="download-all"]')
       .addEventListener("click", () => downloadAll());
 
+    renderUpdateBtn();
+
     appendToBody(panelEl);
     return panelEl;
+  }
+
+  function checkVersion() {
+    fetch("https://www.undsky.com/v.json")
+      .then((res) => res.json())
+      .then((data) => {
+        const info = data?.["doudou-smartedu"];
+        if (!info || !info.version) return;
+
+        const currentVersion =
+          (typeof chrome !== "undefined" &&
+            chrome.runtime?.getManifest?.()?.version) ||
+          "1.0.3";
+
+        if (info.version !== currentVersion) {
+          hasUpdate = true;
+          if (info.url) updateUrl = info.url;
+          renderUpdateBtn();
+        }
+      })
+      .catch((err) => {
+        console.warn("[SmartEdu] 版本检测失败:", err);
+      });
+  }
+
+  function renderUpdateBtn() {
+    if (!panelEl || !hasUpdate) return;
+    const actionsEl = panelEl.querySelector(".doudou-smartedu-panel-actions");
+    if (!actionsEl) return;
+
+    let updateBtn = actionsEl.querySelector('[data-action="update"]');
+    if (!updateBtn) {
+      const refreshBtn = actionsEl.querySelector('[data-action="refresh"]');
+      updateBtn = document.createElement("button");
+      updateBtn.className = "doudou-smartedu-icon-btn";
+      updateBtn.setAttribute("data-action", "update");
+      updateBtn.title = "下载最新版本";
+      updateBtn.innerHTML = "↓";
+      updateBtn.addEventListener("click", () => {
+        window.open(updateUrl, "_blank", "noopener,noreferrer");
+      });
+      if (refreshBtn) {
+        actionsEl.insertBefore(updateBtn, refreshBtn);
+      } else {
+        actionsEl.appendChild(updateBtn);
+      }
+    }
   }
 
   function updateBallCount() {
@@ -1144,6 +1195,8 @@
 
   function init() {
     if (!location.hostname.includes("smartedu.cn")) return;
+
+    checkVersion();
 
     // 预热 WASM 核心模块。失败不影响资源扫描展示，
     // 但会让面板进入"不可下载"状态——下载路径没有任何 JS 兜底。
