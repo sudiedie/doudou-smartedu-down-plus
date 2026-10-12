@@ -12,10 +12,12 @@
   // ==================== 全局状态 ====================
 
   const resourceMap = new Map();
+  const selectedResourceKeys = new Set();
 
   let panelEl = null;
   let isDownloading = false;
   let isDownloadingAll = false;
+  let isChoosingDirectory = false;
   const downloadingResources = new Set(); // 跟踪正在下载的资源，防止重复下载
   let ballEl = null;
   let isCollapsed = false;
@@ -410,7 +412,7 @@
 
   const SEGMENT_CONCURRENCY = 6;
 
-  async function downloadHlsVideo(res, progress) {
+  async function downloadHlsVideo(res, progress, directoryHandle = null) {
     const filename =
       (await sanitizeFilename(
         `${res.title}${res.quality ? `-${res.quality}` : ""}`,
@@ -498,7 +500,7 @@
       );
 
       if (progress) progress.update(100, `合并中 · ${formatSize(bytes)}`);
-      downloadBlob(new Blob(chunks, { type: "video/mp2t" }), filename);
+      await downloadBlob(new Blob(chunks, { type: "video/mp2t" }), filename, directoryHandle, progress);
     } catch (err) {
       console.error("[SmartEdu] 视频全量合并失败:", err);
       if (progress && progress.error) {
@@ -508,7 +510,45 @@
     }
   }
 
-  function downloadBlob(blob, filename) {
+  // 已选资源直接写入本次选择的目录，不依赖浏览器的默认下载位置。
+  async function downloadBlob(blob, filename, directoryHandle = null, progress = null) {
+    if (directoryHandle) {
+      const dot = filename.lastIndexOf(".");
+      const stem = dot > 0 ? filename.slice(0, dot) : filename;
+      const ext = dot > 0 ? filename.slice(dot) : "";
+      let savedName = filename;
+      let fileHandle = null;
+      let writable = null;
+
+      try {
+        // 遇到已有同名文件（或目录）时加序号，保留原文件。
+        for (let suffix = 1; suffix <= 10000; suffix++) {
+          savedName = suffix === 1 ? filename : `${stem} (${suffix})${ext}`;
+          try {
+            await directoryHandle.getFileHandle(savedName);
+          } catch (error) {
+            if (error.name === "NotFoundError") {
+              fileHandle = await directoryHandle.getFileHandle(savedName, { create: true });
+              break;
+            }
+            if (error.name !== "TypeMismatchError") throw error;
+          }
+        }
+        if (!fileHandle) throw new Error("同名文件过多，请换一个文件夹");
+        if (progress) progress.update(100, `正在保存到「${directoryHandle.name}」：${savedName}`);
+        writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        // 只有关闭写入流成功，才计为已保存。
+        await writable.close();
+        return savedName;
+      } catch (error) {
+        if (writable) {
+          try { await writable.abort(); } catch (e) {}
+        }
+        throw new Error(`无法将「${savedName}」保存到「${directoryHandle.name}」：${error.message || "请检查文件夹写入权限和磁盘空间"}`);
+      }
+    }
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -521,7 +561,7 @@
     }, 1000);
   }
 
-  async function downloadNormalFile(res, progress) {
+  async function downloadNormalFile(res, progress, directoryHandle = null) {
     const filename =
       (await sanitizeFilename(res.title)) + (res.ext ? `.${res.ext}` : "");
 
@@ -559,7 +599,7 @@
     }
 
     const blob = new Blob(chunks);
-    downloadBlob(blob, filename);
+    await downloadBlob(blob, filename, directoryHandle, progress);
   }
 
   // ==================== 资源全树递归解析 ====================
@@ -796,20 +836,54 @@
 
   // ==================== 面板 UI 与事件 ====================
 
+  function getSelectedResources() {
+    return getSortedResources().filter((res) => selectedResourceKeys.has(buildResourceKey(res)));
+  }
+
+  function updateSelectionControls(resources = getSortedResources()) {
+    const availableKeys = new Set(resources.map(buildResourceKey));
+    for (const key of selectedResourceKeys) {
+      if (!availableKeys.has(key)) selectedResourceKeys.delete(key);
+    }
+    if (!panelEl) return;
+
+    const selectedCount = selectedResourceKeys.size;
+    const busy = isDownloading || isDownloadingAll;
+    const countEl = panelEl.querySelector(".doudou-smartedu-count");
+    if (countEl) countEl.textContent = `已选 ${selectedCount} / 共 ${resources.length} 个资源`;
+
+    const downloadBtn = panelEl.querySelector('[data-action="download-selected"]');
+    if (downloadBtn) {
+      downloadBtn.textContent = isDownloadingAll
+        ? (isChoosingDirectory ? "选择文件夹…" : "下载中…")
+        : `下载已选（${selectedCount}）`;
+      downloadBtn.title = "先选择保存文件夹，再下载勾选的资源";
+      downloadBtn.disabled = busy || Boolean(wasmError) || selectedCount === 0;
+    }
+    const selectAllBtn = panelEl.querySelector('[data-action="select-all"]');
+    if (selectAllBtn) selectAllBtn.disabled = busy || resources.length === 0 || selectedCount === resources.length;
+    const clearBtn = panelEl.querySelector('[data-action="clear-selection"]');
+    if (clearBtn) clearBtn.disabled = busy || selectedCount === 0;
+  }
+
+  function selectResources(selectAll) {
+    if (isDownloading || isDownloadingAll) return;
+    selectedResourceKeys.clear();
+    if (selectAll) {
+      getSortedResources().forEach((res) => selectedResourceKeys.add(buildResourceKey(res)));
+    }
+    renderList();
+  }
+
   function renderList() {
     if (!panelEl) return;
     const listEl = panelEl.querySelector(".doudou-smartedu-list");
-    const countEl = panelEl.querySelector(".doudou-smartedu-count");
-
     if (!listEl) return;
+    const scrollTop = listEl.scrollTop;
     listEl.innerHTML = "";
 
     const resources = getSortedResources();
-    if (countEl) countEl.textContent = `共 ${resources.length} 个资源`;
-
-    // WASM 不可用时下载能力整体停用，面板明确告知而不是悄悄退化
-    const downloadAllBtn = panelEl.querySelector('[data-action="download-all"]');
-    if (downloadAllBtn) downloadAllBtn.disabled = Boolean(wasmError) || isDownloadingAll;
+    updateSelectionControls(resources);
 
     if (wasmError) {
       const warn = document.createElement("div");
@@ -829,12 +903,29 @@
       return;
     }
 
-    resources.forEach((res) => {
+    resources.forEach((res, index) => {
+      const resourceKey = buildResourceKey(res);
       const item = document.createElement("div");
       item.className = "doudou-smartedu-item";
+      item.classList.toggle("doudou-smartedu-item-selected", selectedResourceKeys.has(resourceKey));
 
-      const info = document.createElement("div");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.id = `doudou-smartedu-resource-${index}`;
+      checkbox.className = "doudou-smartedu-checkbox";
+      checkbox.checked = selectedResourceKeys.has(resourceKey);
+      checkbox.disabled = isDownloading || isDownloadingAll;
+      checkbox.setAttribute("aria-label", `选择 ${res.title} ${(res.format || "文件").toUpperCase()}${res.quality ? ` ${res.quality}` : ""}`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedResourceKeys.add(resourceKey);
+        else selectedResourceKeys.delete(resourceKey);
+        item.classList.toggle("doudou-smartedu-item-selected", checkbox.checked);
+        updateSelectionControls();
+      });
+
+      const info = document.createElement("label");
       info.className = "doudou-smartedu-item-info";
+      info.htmlFor = checkbox.id;
 
       const title = document.createElement("div");
       title.className = "doudou-smartedu-item-title";
@@ -860,21 +951,20 @@
       btn.className = "doudou-smartedu-btn";
       btn.textContent = "下载";
 
-      // 资源唯一键，用于跟踪该资源是否正在下载
-      const resourceKey = buildResourceKey(res);
-
       btn.addEventListener("click", () => downloadOne(res, btn, resourceKey));
 
       // 批量下载中、该资源正在下载、或 WASM 不可用时，保持按钮禁用
-      if (isDownloadingAll || downloadingResources.has(resourceKey) || wasmError) {
+      if (isDownloading || isDownloadingAll || downloadingResources.has(resourceKey) || wasmError) {
         btn.disabled = true;
         btn.setAttribute("disabled", "disabled");
       }
 
+      item.appendChild(checkbox);
       item.appendChild(info);
       item.appendChild(btn);
       listEl.appendChild(item);
     });
+    listEl.scrollTop = scrollTop;
   }
 
   function createPanel() {
@@ -893,10 +983,17 @@
           <button class="doudou-smartedu-icon-btn" data-action="collapse" title="收起">—</button>
         </div>
       </div>
+      <div class="doudou-smartedu-selection-bar">
+        <span>勾选需要的资源</span>
+        <div class="doudou-smartedu-selection-actions">
+          <button type="button" class="doudou-smartedu-selection-btn" data-action="select-all">全选</button>
+          <button type="button" class="doudou-smartedu-selection-btn" data-action="clear-selection">取消全选</button>
+        </div>
+      </div>
       <div class="doudou-smartedu-list"></div>
       <div class="doudou-smartedu-panel-footer">
-        <span class="doudou-smartedu-count">共 0 个资源</span>
-        <button class="doudou-smartedu-btn doudou-smartedu-btn-send" data-action="download-all">全部下载</button>
+        <span class="doudou-smartedu-count" aria-live="polite">已选 0 / 共 0 个资源</span>
+        <button class="doudou-smartedu-btn doudou-smartedu-btn-send" data-action="download-selected" disabled>下载已选（0）</button>
       </div>
     `;
 
@@ -909,8 +1006,16 @@
       .addEventListener("click", () => openPanel(true));
 
     panelEl
-      .querySelector('[data-action="download-all"]')
-      .addEventListener("click", () => downloadAll());
+      .querySelector('[data-action="select-all"]')
+      .addEventListener("click", () => selectResources(true));
+
+    panelEl
+      .querySelector('[data-action="clear-selection"]')
+      .addEventListener("click", () => selectResources(false));
+
+    panelEl
+      .querySelector('[data-action="download-selected"]')
+      .addEventListener("click", () => downloadSelected());
 
     renderUpdateBtn();
 
@@ -1080,23 +1185,18 @@
       return;
     }
 
-    // WASM 核心算法模块是硬依赖，未就绪一律拒绝下载
-    if (!(await ensureWasmReady())) {
-      showToast(`无法下载：${wasmError}`, 5000);
-      renderList();
-      return;
-    }
-
     isDownloading = true;
     downloadingResources.add(key); // 标记为正在下载
-    if (btnEl) {
-      btnEl.disabled = true;
-      btnEl.setAttribute("disabled", "disabled");
-    }
-
-    const progress = createProgress(res.title);
+    renderList();
+    let progress = null;
 
     try {
+      // 预热期间也保持下载锁，避免连续点击启动重叠任务。
+      if (!(await ensureWasmReady())) {
+        showToast(`无法下载：${wasmError}`, 5000);
+        return;
+      }
+      progress = createProgress(res.title);
       if (res.format === "m3u8" || (res.url && res.url.includes(".m3u8"))) {
         await downloadHlsVideo(res, progress);
       } else {
@@ -1109,32 +1209,13 @@
     } finally {
       isDownloading = false;
       downloadingResources.delete(key); // 移除下载标记
-      progress.close();
+      if (progress) progress.close();
       // 不直接操作 btnEl，重新渲染列表让按钮状态自动恢复
       renderList();
     }
   }
 
-  // 批量下载时同一标题的视频仅保留清晰度最高的那一个
-  function filterBestQualityResources(resources) {
-    const seenVideoTitles = new Set();
-    const filtered = [];
-
-    for (const res of resources) {
-      const isVideo = res.format === "m3u8" || res.format === "mp4" || (res.url && res.url.includes(".m3u8"));
-      if (isVideo) {
-        const groupKey = `${res.title}_video`;
-        if (seenVideoTitles.has(groupKey)) continue;
-        seenVideoTitles.add(groupKey);
-      }
-      filtered.push(res);
-    }
-
-    return filtered;
-  }
-
-  async function downloadAll() {
-    if (resourceMap.size === 0) return;
+  async function downloadSelected() {
     if (isDownloadingAll) {
       showToast("正在批量下载中，请稍候...");
       return;
@@ -1144,48 +1225,64 @@
       return;
     }
 
-    // WASM 核心算法模块是硬依赖，未就绪一律拒绝下载
-    if (!(await ensureWasmReady())) {
-      showToast(`无法下载：${wasmError}`, 5000);
-      renderList();
+    // 固定本次队列，严格使用勾选的资源及画质，不替换为最高画质。
+    const resources = getSelectedResources();
+    if (resources.length === 0) {
+      showToast("请先勾选需要下载的资源");
       return;
     }
 
-    const allResources = getSortedResources();
-    const resources = filterBestQualityResources(allResources);
-
     isDownloading = true;
     isDownloadingAll = true;
-
-    // 禁用"全部下载"按钮
-    const downloadAllBtn = panelEl && panelEl.querySelector('[data-action="download-all"]');
-    if (downloadAllBtn) downloadAllBtn.disabled = true;
-
-    // 禁用所有单个下载按钮
-    const allDownloadBtns = panelEl && panelEl.querySelectorAll(".doudou-smartedu-item .doudou-smartedu-btn");
-    if (allDownloadBtns) {
-      allDownloadBtns.forEach((btn) => (btn.disabled = true));
-    }
-
-    const progress = createProgress("批量下载中");
+    isChoosingDirectory = true;
+    renderList();
+    let progress = null;
+    let directoryHandle = null;
+    let completed = 0;
 
     try {
+      if (typeof window.showDirectoryPicker !== "function") {
+        showToast("当前浏览器无法选择保存文件夹，请使用新版 Microsoft Edge 或 Chrome 打开平台", 6000);
+        return;
+      }
+      // 必须在点击后立即调用，先等待模块或网络请求会丢失浏览器的用户操作许可。
+      directoryHandle = await window.showDirectoryPicker({
+        id: "smartedu-download-folder",
+        mode: "readwrite",
+        startIn: "downloads",
+      });
+      isChoosingDirectory = false;
+      renderList();
+      if (!(await ensureWasmReady())) {
+        showToast(`无法下载：${wasmError}`, 5000);
+        return;
+      }
+      showToast(`保存位置：「${directoryHandle.name}」，开始下载所选资源`);
+      progress = createProgress("下载已选资源");
       for (let i = 0; i < resources.length; i++) {
         const res = resources[i];
         progress.setTitle(`(${i + 1}/${resources.length}) ${res.title}${res.quality ? ` (${res.quality})` : ""}`);
         if (res.format === "m3u8" || (res.url && res.url.includes(".m3u8"))) {
-          await downloadHlsVideo(res, progress);
+          await downloadHlsVideo(res, progress, directoryHandle);
         } else {
-          await downloadNormalFile(res, progress);
+          await downloadNormalFile(res, progress, directoryHandle);
         }
+        completed++;
       }
-      showToast(`已完成 ${resources.length} 个核心资源的下载并保存`);
+      showToast(`已将 ${completed} 个所选资源保存到「${directoryHandle.name}」`, 5000);
     } catch (e) {
-      showToast(`批量下载中断: ${e.message}`);
+      if (!directoryHandle && e.name === "AbortError") {
+        showToast("已取消选择文件夹，本次未下载");
+      } else if (!directoryHandle && e.name === "NotAllowedError") {
+        showToast("未获得文件夹写入权限，请重新点击“下载已选”并允许保存", 6000);
+      } else {
+        showToast(`批量下载中断（已保存 ${completed}/${resources.length}）：${e.message || "无法选择或写入文件夹"}`, 6000);
+      }
     } finally {
       isDownloading = false;
       isDownloadingAll = false;
-      progress.close();
+      isChoosingDirectory = false;
+      if (progress) progress.close();
       // 重新渲染列表，由 renderList 统一恢复按钮状态（含 WASM 失效时的禁用）
       renderList();
     }
@@ -1233,6 +1330,7 @@
       if (location.href !== lastUrl) {
         lastUrl = location.href;
         resourceMap.clear();
+        selectedResourceKeys.clear();
         if (panelEl) renderList();
         updateBallCount();
         scheduleAutoScan();

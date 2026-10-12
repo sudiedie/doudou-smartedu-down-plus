@@ -134,6 +134,62 @@
 }
 
 
+.doudou-smartedu-selection-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef2f7;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.doudou-smartedu-selection-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.doudou-smartedu-selection-btn {
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #1890ff;
+  padding: 4px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.doudou-smartedu-selection-btn:hover {
+  background: #eff6ff;
+}
+
+.doudou-smartedu-selection-btn:disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.doudou-smartedu-checkbox {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: #1890ff;
+  cursor: pointer;
+}
+
+.doudou-smartedu-checkbox:disabled {
+  cursor: not-allowed;
+}
+
+.doudou-smartedu-checkbox:focus-visible,
+.doudou-smartedu-selection-btn:focus-visible {
+  outline: 2px solid #1890ff;
+  outline-offset: 3px;
+}
+
 .doudou-smartedu-list {
   flex: 1;
   min-height: 0;
@@ -184,9 +240,16 @@
   background: #fffbeb;
 }
 
+.doudou-smartedu-item-selected,
+.doudou-smartedu-item-selected:hover {
+  border-color: #1890ff;
+  background: #eff6ff;
+}
+
 .doudou-smartedu-item-info {
   flex: 1;
   min-width: 0;
+  cursor: pointer;
 }
 
 .doudou-smartedu-item-title {
@@ -401,7 +464,8 @@
   }
 
   .doudou-smartedu-panel-header,
-  .doudou-smartedu-panel-footer {
+  .doudou-smartedu-panel-footer,
+  .doudou-smartedu-selection-bar {
     border-color: #374151;
   }
 
@@ -423,6 +487,16 @@
   .doudou-smartedu-item:hover {
     border-color: #f59e0b;
     background: #292218;
+  }
+
+  .doudou-smartedu-item-selected,
+  .doudou-smartedu-item-selected:hover {
+    border-color: #1890ff;
+    background: #172d46;
+  }
+
+  .doudou-smartedu-selection-btn:hover {
+    background: #172d46;
   }
 
   .doudou-smartedu-empty {
